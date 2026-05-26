@@ -1,398 +1,225 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
+import axios from 'axios';
 import './App.css';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const API_BASE = 'http://localhost:5000/bfhl/tasks';
 
-const STATUS_ORDER = ['open', 'in_progress', 'resolved', 'closed'];
-
-const STATUS_META = {
-  open:        { label: 'Open',        color: '#4f6ef7' },
-  in_progress: { label: 'In Progress', color: '#a78bfa' },
-  resolved:    { label: 'Resolved',    color: '#34d399' },
-  closed:      { label: 'Closed',      color: '#525c72' },
-};
-
-const PRIORITY_COLORS = {
-  low: '#34d399', medium: '#fbbf24', high: '#f97316', urgent: '#ef4444',
-};
-
-function formatAge(minutes) {
-  if (minutes < 60) return `${minutes}m`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
-}
-
-function getAllowedTransitions(status) {
-  const idx = STATUS_ORDER.indexOf(status);
-  const transitions = [];
-  if (idx < STATUS_ORDER.length - 1) transitions.push({ to: STATUS_ORDER[idx + 1], dir: 'forward' });
-  if (idx > 0) transitions.push({ to: STATUS_ORDER[idx - 1], dir: 'backward' });
-  return transitions;
-}
-
-function TransitionLabel({ to, dir }) {
-  const arrows = { forward: '→', backward: '←' };
-  const labels = {
-    open: 'Open', in_progress: 'In Progress', resolved: 'Resolved', closed: 'Closed',
-  };
-  return <>{arrows[dir]} {labels[to]}</>;
-}
-
-function StatStrip({ stats }) {
-  if (!stats) return null;
-  const statusItems = Object.entries(stats.byStatus || {});
-  return (
-    <div className="stats-strip">
-      {statusItems.map(([status, count]) => (
-        <div className="stat-pill" key={status}>
-          <span className="stat-dot" style={{ background: STATUS_META[status]?.color || '#888' }} />
-          <span className="stat-label">{STATUS_META[status]?.label || status}</span>
-          <span className="stat-value">{count}</span>
-        </div>
-      ))}
-      <div className="stat-pill breach-pill">
-        <span>🔥</span>
-        <span className="stat-label">SLA Breached</span>
-        <span className="stat-value">{stats.openSlaBreached ?? 0}</span>
-      </div>
-    </div>
-  );
-}
-
-function TicketCard({ ticket, onTransition, onDelete }) {
-  const [moving, setMoving] = useState(false);
-  const transitions = getAllowedTransitions(ticket.status);
-
-  async function handleTransition(toStatus) {
-    setMoving(true);
-    await onTransition(ticket._id, toStatus);
-    setMoving(false);
-  }
-
-  return (
-    <div className={`ticket-card${ticket.slaBreached ? ' breached' : ''}`}>
-      <div className="card-top">
-        <span className="card-subject">{ticket.subject}</span>
-        <span className={`priority-badge ${ticket.priority}`}>{ticket.priority}</span>
-      </div>
-
-      <div className="card-meta">
-        <span className="meta-item">
-          <span className="meta-icon">⏱</span>
-          {formatAge(ticket.ageMinutes)}
-        </span>
-        <span className="meta-item">
-          <span className="meta-icon">✉</span>
-          {ticket.customerEmail}
-        </span>
-        {ticket.slaBreached && (
-          <span className="breach-badge">⚠ SLA Breached</span>
-        )}
-      </div>
-
-      <div className="card-actions">
-        {transitions.map(({ to, dir }) => (
-          <button
-            key={to}
-            className={`transition-btn ${dir}`}
-            disabled={moving}
-            onClick={() => handleTransition(to)}
-          >
-            <TransitionLabel to={to} dir={dir} />
-          </button>
-        ))}
-        <button className="delete-btn" onClick={() => onDelete(ticket._id)} title="Delete ticket">✕</button>
-      </div>
-    </div>
-  );
-}
-
-const EMPTY_FORM = { subject: '', description: '', customerEmail: '', priority: '' };
-
-function CreateForm({ onCreated, onClose }) {
-  const [fields, setFields] = useState(EMPTY_FORM);
-  const [errors, setErrors] = useState({});
-  const [submitting, setSubmitting] = useState(false);
-
-  function validate(f) {
-    const e = {};
-    if (!f.subject.trim()) e.subject = 'Subject is required.';
-    if (!f.description.trim()) e.description = 'Description is required.';
-    if (!f.customerEmail.trim()) {
-      e.customerEmail = 'Email is required.';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.customerEmail)) {
-      e.customerEmail = 'Enter a valid email address.';
-    }
-    if (!f.priority) e.priority = 'Priority is required.';
-    return e;
-  }
-
-  function handleChange(e) {
-    const { name, value } = e.target;
-    setFields(prev => ({ ...prev, [name]: value }));
-    if (errors[name]) setErrors(prev => ({ ...prev, [name]: undefined }));
-  }
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    const e2 = validate(fields);
-    if (Object.keys(e2).length) { setErrors(e2); return; }
-    setSubmitting(true);
-    try {
-      const res = await fetch(`${API}/tickets`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fields),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to create ticket.');
-      onCreated(data);
-      setFields(EMPTY_FORM);
-      setErrors({});
-    } catch (err) {
-      setErrors({ form: err.message });
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="create-form-wrapper">
-      <form className="create-form" onSubmit={handleSubmit} noValidate>
-        <div className="form-group">
-          <label className="form-label">Subject</label>
-          <input
-            className={`form-input${errors.subject ? ' error' : ''}`}
-            name="subject"
-            value={fields.subject}
-            onChange={handleChange}
-            placeholder="Brief summary of the issue"
-          />
-          {errors.subject && <span className="form-error">⚠ {errors.subject}</span>}
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Customer Email</label>
-          <input
-            className={`form-input${errors.customerEmail ? ' error' : ''}`}
-            name="customerEmail"
-            type="email"
-            value={fields.customerEmail}
-            onChange={handleChange}
-            placeholder="customer@example.com"
-          />
-          {errors.customerEmail && <span className="form-error">⚠ {errors.customerEmail}</span>}
-        </div>
-
-        <div className="form-group full-width">
-          <label className="form-label">Description</label>
-          <textarea
-            className={`form-textarea${errors.description ? ' error' : ''}`}
-            name="description"
-            value={fields.description}
-            onChange={handleChange}
-            placeholder="Detailed description of the issue..."
-          />
-          {errors.description && <span className="form-error">⚠ {errors.description}</span>}
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Priority</label>
-          <select
-            className={`form-select${errors.priority ? ' error' : ''}`}
-            name="priority"
-            value={fields.priority}
-            onChange={handleChange}
-          >
-            <option value="">Select priority</option>
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
-            <option value="urgent">Urgent</option>
-          </select>
-          {errors.priority && <span className="form-error">⚠ {errors.priority}</span>}
-        </div>
-
-        <div className="form-actions full-width">
-          <button className="btn-submit" type="submit" disabled={submitting}>
-            {submitting ? 'Creating…' : '+ Create Ticket'}
-          </button>
-          <button className="btn-cancel" type="button" onClick={onClose}>Cancel</button>
-          {errors.form && <span className="form-error">⚠ {errors.form}</span>}
-        </div>
-      </form>
-    </div>
-  );
-}
-
-export default function App() {
-  const [tickets, setTickets] = useState([]);
-  const [stats, setStats] = useState(null);
+function App() {
+  const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [globalError, setGlobalError] = useState('');
-  const [showForm, setShowForm] = useState(false);
-  const [priorityFilter, setPriorityFilter] = useState('');
-  const [breachedOnly, setBreachedOnly] = useState(false);
+  const [error, setError] = useState(null);
+  const [statusFilter, setStatusFilter] = useState('All');
+  const [minImportance, setMinImportance] = useState(1);
+  const [formData, setFormData] = useState({
+    title: '',
+    description: '',
+    importance: 3,
+    dueDate: ''
+  });
+  const [formLoading, setFormLoading] = useState(false);
 
-  const fetchStats = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/tickets/stats`);
-      const data = await res.json();
-      setStats(data);
-    } catch (_) {}
-  }, []);
-
-  const fetchTickets = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (priorityFilter) params.set('priority', priorityFilter);
-      if (breachedOnly) params.set('breached', 'true');
-      const res = await fetch(`${API}/tickets?${params.toString()}`);
-      if (!res.ok) throw new Error('Failed to load tickets.');
-      const data = await res.json();
-      setTickets(data);
-      setGlobalError('');
-    } catch (err) {
-      setGlobalError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [priorityFilter, breachedOnly]);
-
-  useEffect(() => { fetchTickets(); fetchStats(); }, [fetchTickets, fetchStats]);
-
-  function handleCreated(newTicket) {
-    const enriched = {
-      ...newTicket,
-      ageMinutes: 0,
-      slaBreached: false,
+  useEffect(() => {
+    let isCancelled = false;
+    const loadData = async () => {
+      try {
+        const params = {};
+        if (statusFilter !== 'All') {
+          params.status = statusFilter.toLowerCase();
+        }
+        if (minImportance > 1) {
+          params.minImportance = minImportance;
+        }
+        const response = await axios.get(API_BASE, { params });
+        if (!isCancelled) {
+          setTasks(response.data);
+          setLoading(false);
+        }
+      } catch (err) {
+        if (!isCancelled) {
+          setError(err.message || 'Failed to fetch tasks');
+          setLoading(false);
+        }
+      }
     };
-    setTickets(prev => [enriched, ...prev]);
-    fetchStats();
-    setShowForm(false);
-  }
+    loadData();
+    return () => {
+      isCancelled = true;
+    };
+  }, [statusFilter, minImportance]);
 
-  async function handleTransition(id, toStatus) {
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({
+      ...prev,
+      [name]: name === 'importance' ? Number(value) : value
+    }));
+  };
+
+  const validateForm = () => {
+    const { title, dueDate } = formData;
+    if (title.length < 3 || title.length > 100) return false;
+    if (dueDate && new Date(dueDate) <= new Date()) return false;
+    return true;
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!validateForm()) {
+      alert('Invalid input. Title must be 3-100 characters and due date must be in the future.');
+      return;
+    }
+    setFormLoading(true);
     try {
-      const res = await fetch(`${API}/tickets/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: toStatus }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Transition failed.');
-      setTickets(prev =>
-        prev.map(t => {
-          if (t._id !== id) return t;
-          const now = Date.now();
-          const created = new Date(data.createdAt).getTime();
-          const ageMinutes = Math.floor((now - created) / 60000);
-          const SLA = { urgent: 60, high: 240, medium: 1440, low: 4320 };
-          return { ...data, ageMinutes, slaBreached: ageMinutes > SLA[data.priority] };
-        })
+      const response = await axios.post(API_BASE, formData);
+      setTasks((prev) => [...prev, response.data].sort((a, b) => b.priorityScore - a.priorityScore));
+      setFormData({ title: '', description: '', importance: 3, dueDate: '' });
+    } catch (err) {
+      alert(err.message || 'Failed to create task');
+    } finally {
+      setFormLoading(false);
+    }
+  };
+
+  const markAsComplete = async (id) => {
+    try {
+      const response = await axios.patch(`${API_BASE}/${id}`, { status: 'completed' });
+      setTasks((prev) =>
+        prev.map((t) => (t._id === id || t.id === id ? response.data : t)).sort((a, b) => b.priorityScore - a.priorityScore)
       );
-      fetchStats();
     } catch (err) {
-      setGlobalError(err.message);
+      alert(err.message || 'Failed to update task');
     }
-  }
+  };
 
-  async function handleDelete(id) {
+  const deleteTask = async (id) => {
+    if (!window.confirm('Are you sure you want to delete this task?')) return;
     try {
-      const res = await fetch(`${API}/tickets/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Delete failed.');
-      setTickets(prev => prev.filter(t => t._id !== id));
-      fetchStats();
+      await axios.delete(`${API_BASE}/${id}`);
+      setTasks((prev) => prev.filter((t) => t._id !== id && t.id !== id));
     } catch (err) {
-      setGlobalError(err.message);
+      alert(err.message || 'Failed to delete task');
     }
-  }
-
-  const columns = STATUS_ORDER.map(status => ({
-    status,
-    meta: STATUS_META[status],
-    tickets: tickets.filter(t => t.status === status),
-  }));
+  };
 
   return (
-    <>
+    <div className="app-container">
       <header className="app-header">
-        <div className="app-logo">🎫</div>
-        <h1 className="app-title">DeskFlow</h1>
-        <span className="app-subtitle">Support Ticket Board</span>
+        <h1>TaskFlow</h1>
       </header>
 
-      <StatStrip stats={stats} />
-
-      <div className="controls-bar">
-        <span className="controls-label">Filters</span>
-        <select
-          className="filter-select"
-          value={priorityFilter}
-          onChange={e => setPriorityFilter(e.target.value)}
-        >
-          <option value="">All Priorities</option>
-          <option value="urgent">Urgent</option>
-          <option value="high">High</option>
-          <option value="medium">Medium</option>
-          <option value="low">Low</option>
+      <section className="filters-section">
+        <select value={statusFilter} onChange={(e) => {
+          setLoading(true);
+          setError(null);
+          setStatusFilter(e.target.value);
+        }}>
+          <option value="All">All</option>
+          <option value="Pending">Pending</option>
+          <option value="Completed">Completed</option>
         </select>
-        <label className="breach-checkbox-label">
+        <div className="slider-container">
+          <label>Min Importance: {minImportance}</label>
           <input
-            type="checkbox"
-            checked={breachedOnly}
-            onChange={e => setBreachedOnly(e.target.checked)}
+            type="range"
+            min="1"
+            max="5"
+            value={minImportance}
+            onChange={(e) => {
+              setLoading(true);
+              setError(null);
+              setMinImportance(Number(e.target.value));
+            }}
           />
-          SLA Breached Only
-        </label>
-      </div>
+        </div>
+      </section>
 
-      <div className="create-section">
-        <button className="create-toggle-btn" onClick={() => setShowForm(v => !v)}>
-          {showForm ? '✕ Cancel' : '+ New Ticket'}
-        </button>
-        {showForm && (
-          <CreateForm onCreated={handleCreated} onClose={() => setShowForm(false)} />
-        )}
-      </div>
+      <section className="create-task-section">
+        <h2>Create Task</h2>
+        <form onSubmit={handleSubmit}>
+          <input
+            type="text"
+            name="title"
+            placeholder="Title (3-100 chars)"
+            value={formData.title}
+            onChange={handleInputChange}
+            required
+          />
+          <textarea
+            name="description"
+            placeholder="Description"
+            value={formData.description}
+            onChange={handleInputChange}
+          ></textarea>
+          <div className="form-group">
+            <label>Importance (1-5)</label>
+            <input
+              type="number"
+              name="importance"
+              min="1"
+              max="5"
+              value={formData.importance}
+              onChange={handleInputChange}
+              required
+            />
+          </div>
+          <div className="form-group">
+            <label>Due Date</label>
+            <input
+              type="datetime-local"
+              name="dueDate"
+              value={formData.dueDate}
+              onChange={handleInputChange}
+              required
+            />
+          </div>
+          <button type="submit" disabled={formLoading || !validateForm()}>
+            {formLoading ? 'Creating...' : 'Submit'}
+          </button>
+        </form>
+      </section>
 
-      {globalError && <div className="global-error">⚠ {globalError}</div>}
-
-      {loading ? (
-        <div className="loading-spinner"><div className="spinner" /></div>
-      ) : (
-        <main className="board">
-          {columns.map(({ status, meta, tickets: col }) => (
-            <section className="column" key={status}>
-              <div className="column-header">
-                <div className="column-title">
-                  <span className="column-dot" style={{ background: meta.color }} />
-                  {meta.label}
-                </div>
-                <span className="column-count">{col.length}</span>
-              </div>
-              <div className="cards-list">
-                {col.length === 0 ? (
-                  <div className="empty-state">
-                    <span className="empty-icon">📭</span>
-                    <span>No tickets</span>
+      <main className="task-grid-section">
+        {error && <div className="error-message">{error}</div>}
+        {loading ? (
+          <div className="loading-indicator">Loading tasks...</div>
+        ) : tasks.length === 0 ? (
+          <div className="empty-state">No tasks found</div>
+        ) : (
+          <div className="task-grid">
+            {tasks.map((task) => {
+              const taskId = task._id || task.id;
+              const isHighPriority = task.priorityScore >= 50;
+              return (
+                <div
+                  key={taskId}
+                  className="task-card"
+                  style={isHighPriority ? { border: '2px solid red' } : {}}
+                >
+                  {isHighPriority && <span className="high-priority-badge">High Priority</span>}
+                  <h3>{task.title}</h3>
+                  <p>{task.description}</p>
+                  <div className="task-meta">
+                    <span>Importance: {task.importance}</span>
+                    <span>Status: {task.status}</span>
+                    <span>Score: {task.priorityScore}</span>
                   </div>
-                ) : (
-                  col.map(ticket => (
-                    <TicketCard
-                      key={ticket._id}
-                      ticket={ticket}
-                      onTransition={handleTransition}
-                      onDelete={handleDelete}
-                    />
-                  ))
-                )}
-              </div>
-            </section>
-          ))}
-        </main>
-      )}
-    </>
+                  <div className="task-date">
+                    Due: {new Date(task.dueDate).toLocaleString()}
+                  </div>
+                  <div className="task-actions">
+                    {task.status !== 'completed' && (
+                      <button onClick={() => markAsComplete(taskId)}>Mark as Complete</button>
+                    )}
+                    <button className="delete-btn" onClick={() => deleteTask(taskId)}>Delete</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </main>
+    </div>
   );
 }
+
+export default App;
